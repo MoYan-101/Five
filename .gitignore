@@ -1,0 +1,38 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Build / packaging artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+.jupyter/
+
+# IDE / OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Project temporary files
+_tmp_*.py
+*_code_tmp.py
+
+# Generated analysis outputs
+analysis_report*.csv
+ktss_analysis_report.csv
+Figure/
+
