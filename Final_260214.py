@@ -267,6 +267,9 @@ class LiteratureAnalyzer:
 
         # topic->dimension map
         self.topic_to_dimension = None
+        self.topic_top_terms_df = None
+        self.topic_dimension_df = None
+        self.n_topics = None
 
     def load_data(self, min_abstract_len=30):
         if not self.filepath or not os.path.exists(self.filepath):
@@ -480,14 +483,28 @@ class LiteratureAnalyzer:
             max_iter=1500
         )
         self.topic_values = self.nmf_model.fit_transform(self.tfidf_matrix)
+        self.n_topics = int(n_topics)
         self.df["Topic_ID"] = (self.topic_values.argmax(axis=1) + 1).astype(int)
 
+        topic_term_rows = []
         print("-" * 70)
         for k, comp in enumerate(self.nmf_model.components_, start=1):
             top_idx = comp.argsort()[::-1][:top_terms]
-            words = [self.feature_names[i] for i in top_idx]
+            words = []
+            for r, i in enumerate(top_idx, start=1):
+                term = self.feature_names[i]
+                weight = float(comp[i])
+                words.append(term)
+                topic_term_rows.append({
+                    "K": int(n_topics),
+                    "Topic_ID": int(k),
+                    "Term_Rank": int(r),
+                    "Term": term,
+                    "Term_Weight": weight
+                })
             print(f"Topic {k}: {', '.join(words)}")
         print("-" * 70)
+        self.topic_top_terms_df = pd.DataFrame(topic_term_rows)
 
         if plot:
             fig, ax = plt.subplots(figsize=(6.6, 3.9), dpi=300)
@@ -621,6 +638,7 @@ class LiteratureAnalyzer:
             plt.show()
 
         self.topic_to_dimension = mapping
+        self.topic_dimension_df = map_df.copy()
         return mapping, map_df
 
     def extract_key_sentences(self, sample_n=3):
@@ -679,6 +697,28 @@ class LiteratureAnalyzer:
             return
         self.df.to_csv(output_file, index=False, encoding="utf-8-sig")
         print(f"\n[Saved] {output_file}")
+
+    def save_topic_top_terms(self, output_file="topic_top_terms.csv", run_name=None):
+        if self.topic_top_terms_df is None or self.topic_top_terms_df.empty:
+            print("[Warn] No topic top terms to save. Run extract_topics_guided() first.")
+            return
+        out_df = self.topic_top_terms_df.copy()
+        if run_name is not None and str(run_name).strip():
+            out_df.insert(0, "Run_Name", str(run_name))
+        out_df.to_csv(output_file, index=False, encoding="utf-8-sig")
+        print(f"[Saved] {output_file}")
+
+    def save_topic_dimension_crosswalk(self, output_file="topic_dimension_crosswalk.csv", run_name=None):
+        if self.topic_dimension_df is None or self.topic_dimension_df.empty:
+            print("[Warn] No topic-dimension crosswalk to save. Run map_topics_to_dimensions_many() first.")
+            return
+        out_df = self.topic_dimension_df.copy()
+        if self.n_topics is not None and "K" not in out_df.columns:
+            out_df.insert(0, "K", int(self.n_topics))
+        if run_name is not None and str(run_name).strip():
+            out_df.insert(0, "Run_Name", str(run_name))
+        out_df.to_csv(output_file, index=False, encoding="utf-8-sig")
+        print(f"[Saved] {output_file}")
 
 
 
@@ -743,6 +783,15 @@ def run_pipeline_variant(
 
         analyzer.extract_key_sentences(sample_n=3)
         analyzer.save_results(output_file)
+        base, _ = os.path.splitext(output_file)
+        analyzer.save_topic_top_terms(
+            output_file=f"{base}_topic_top_terms.csv",
+            run_name=run_name,
+        )
+        analyzer.save_topic_dimension_crosswalk(
+            output_file=f"{base}_topic_dimension_crosswalk.csv",
+            run_name=run_name,
+        )
 
 
 # Main analysis: keep domain-generic stopwords, disable seed boosting.
