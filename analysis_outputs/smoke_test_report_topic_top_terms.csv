@@ -1,0 +1,61 @@
+﻿Run_Name,K,Topic_ID,Term_Rank,Term,Term_Weight
+Smoke test,5,1,1,delivery,1.004679378648758
+Smoke test,5,1,2,service delivery,1.0045125999961766
+Smoke test,5,1,3,public service,0.6361404318190023
+Smoke test,5,1,4,citizens,0.5270646764717208
+Smoke test,5,1,5,citizen,0.5171952659038255
+Smoke test,5,1,6,service,0.3354004250271026
+Smoke test,5,1,7,accessibility,0.3047821397550253
+Smoke test,5,1,8,quality,0.23918324069189553
+Smoke test,5,1,9,public,0.22239843646158414
+Smoke test,5,1,10,making,0.2146438988715378
+Smoke test,5,1,11,access,0.20730526161860782
+Smoke test,5,1,12,accountability,0.20457961320006574
+Smoke test,5,2,1,leadership,0.7960818982019492
+Smoke test,5,2,2,transformational,0.7401717493847553
+Smoke test,5,2,3,transformational leadership,0.6502728240725435
+Smoke test,5,2,4,organizational,0.3440126622628798
+Smoke test,5,2,5,role,0.2847362280087408
+Smoke test,5,2,6,agility,0.1509455974004596
+Smoke test,5,2,7,adaptive,0.1209278927569088
+Smoke test,5,2,8,influence,0.1094068358748373
+Smoke test,5,2,9,level,0.10655330157059359
+Smoke test,5,2,10,understanding,0.0923500752716801
+Smoke test,5,2,11,vision,0.08352410059565919
+Smoke test,5,2,12,strategy,0.08090049589234534
+Smoke test,5,3,1,administrative,0.5915311551455077
+Smoke test,5,3,2,organizational,0.5543394059744927
+Smoke test,5,3,3,level,0.4608121498182487
+Smoke test,5,3,4,bureaucracy,0.4163641054629733
+Smoke test,5,3,5,case,0.3127739496574901
+Smoke test,5,3,6,collaboration,0.28871795908928266
+Smoke test,5,3,7,bureaucratic,0.2856019478518634
+Smoke test,5,3,8,integration,0.24557219452563067
+Smoke test,5,3,9,processes,0.24329865437592763
+Smoke test,5,3,10,rights,0.22668095424428183
+Smoke test,5,3,11,management,0.15031079520828913
+Smoke test,5,3,12,information,0.12456778454962787
+Smoke test,5,4,1,role,0.8842403711186265
+Smoke test,5,4,2,decision,0.5047254332101596
+Smoke test,5,4,3,making,0.40013578410730666
+Smoke test,5,4,4,discretion,0.39197576632970216
+Smoke test,5,4,5,decision making,0.3877559562589851
+Smoke test,5,4,6,processes,0.2492725659927603
+Smoke test,5,4,7,experience,0.2361315916820139
+Smoke test,5,4,8,process,0.2120007253172795
+Smoke test,5,4,9,automation,0.18447139681434183
+Smoke test,5,4,10,e-government,0.14260635449549444
+Smoke test,5,4,11,role e-governance,0.11904731903420383
+Smoke test,5,4,12,public,0.11359284476363785
+Smoke test,5,5,1,business,0.47166387790234626
+Smoke test,5,5,2,power,0.4404651452839245
+Smoke test,5,5,3,accountability,0.428668279715065
+Smoke test,5,5,4,leadership,0.324748731982971
+Smoke test,5,5,5,process,0.3239389081482001
+Smoke test,5,5,6,collaboration,0.31454662466759575
+Smoke test,5,5,7,organization,0.2627727521115358
+Smoke test,5,5,8,departmental,0.2117250761558349
+Smoke test,5,5,9,standard,0.2045790401143045
+Smoke test,5,5,10,mechanisms,0.1946950862388051
+Smoke test,5,5,11,quality,0.18999698957916109
+Smoke test,5,5,12,coordination,0.17629530374048677

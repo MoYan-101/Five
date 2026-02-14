@@ -1,0 +1,2 @@
+﻿Run_Name,K,Seed,C_v,U_mass,Top_n_terms,NMF_Init,Coherence_Processes,SeedBoost_ON
+Smoke test,5,42,0.4062133937738861,-3.8898506784465603,10,nndsvdar,1,True

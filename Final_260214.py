@@ -9,9 +9,9 @@
 import os
 import re
 from datetime import datetime
+from multiprocessing import freeze_support
 import pandas as pd
 import numpy as np
-import itertools
 
 from sklearn.feature_extraction.text import TfidfVectorizer, ENGLISH_STOP_WORDS
 from sklearn.decomposition import NMF
@@ -35,6 +35,22 @@ try:
 except ImportError:
     pass
 
+# Compatibility shim for older gensim with newer scipy builds.
+try:
+    import scipy.linalg.special_matrices as _scipy_special_matrices
+    if not hasattr(_scipy_special_matrices, "triu"):
+        _scipy_special_matrices.triu = np.triu
+except Exception:
+    pass
+
+gensim_coherence_model = None
+gensim_dictionary = None
+try:
+    from gensim.models.coherencemodel import CoherenceModel as gensim_coherence_model
+    from gensim.corpora import Dictionary as gensim_dictionary
+except ImportError:
+    pass
+
 try:
     from IPython.display import display
 except ImportError:
@@ -42,7 +58,7 @@ except ImportError:
         print(x)
 
 # ===========================
-# ✅ FIGURE-ONLY MODIFICATIONS START
+# 鉁?FIGURE-ONLY MODIFICATIONS START
 # ===========================
 
 # Seaborn theme for publication
@@ -113,7 +129,7 @@ def _annotate_bar(ax, pad=0.15, fmt="{:d}"):
                 va="bottom", ha="center", fontsize=11)
 
 # ===========================
-# ✅ FIGURE-ONLY MODIFICATIONS END
+# 鉁?FIGURE-ONLY MODIFICATIONS END
 # ===========================
 
 
@@ -220,6 +236,7 @@ def _parse_bib_fallback(filepath: str):
     return entries
 
 FIGURE_DIR = "Figure"
+ANALYSIS_OUTPUT_DIR = "analysis_outputs"
 
 def _get_unique_path(filepath: str, default_dir: str = FIGURE_DIR) -> str:
     """Return a non-overwriting path. Bare filenames are saved into default_dir."""
@@ -242,6 +259,25 @@ def _get_unique_path(filepath: str, default_dir: str = FIGURE_DIR) -> str:
         candidate = os.path.join(folder, f"{stem}_{ts}_{idx}{ext}")
         idx += 1
     return candidate
+
+
+def _ensure_parent_dir(filepath: str):
+    parent = os.path.dirname(filepath)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+
+def _write_csv_with_fallback(df: pd.DataFrame, output_file: str):
+    _ensure_parent_dir(output_file)
+    try:
+        df.to_csv(output_file, index=False, encoding="utf-8-sig")
+        print(f"[Saved] {output_file}")
+        return output_file
+    except PermissionError:
+        fallback_path = _get_unique_path(output_file, default_dir=ANALYSIS_OUTPUT_DIR)
+        df.to_csv(fallback_path, index=False, encoding="utf-8-sig")
+        print(f"[Warn] Target file is in use; saved to fallback path: {fallback_path}")
+        return fallback_path
 
 
 class LiteratureAnalyzer:
@@ -270,6 +306,9 @@ class LiteratureAnalyzer:
         self.topic_top_terms_df = None
         self.topic_dimension_df = None
         self.n_topics = None
+        self.coherence_seed_scores_df = None
+        self.coherence_scores_df = None
+        self.selected_n_topics = None
 
     def load_data(self, min_abstract_len=30):
         if not self.filepath or not os.path.exists(self.filepath):
@@ -418,13 +457,14 @@ class LiteratureAnalyzer:
 
         return keywords
 
-    def _boost_seed_features(self, boost_dict):
+    def _boost_seed_features(self, boost_dict, verbose=True):
         """
         For each seed token, apply only one scale factor:
         max(dim_boost * specificity_weight) among all matched dimensions.
         """
         if self.seed_features_by_dim is None:
-            print("[Warn] seed_features_by_dim is empty. Run build_tfidf() first.")
+            if verbose:
+                print("[Warn] seed_features_by_dim is empty. Run build_tfidf() first.")
             return 0
 
         term_to_idx = {t: i for i, t in enumerate(self.feature_names)}
@@ -444,7 +484,8 @@ class LiteratureAnalyzer:
                     col_scale[j] = s
 
         if not col_scale:
-            print("[Warn] No seed-features matched for boosting.")
+            if verbose:
+                print("[Warn] No seed-features matched for boosting.")
             return 0
 
         mat = self.tfidf_matrix.tocsc(copy=True)
@@ -453,9 +494,275 @@ class LiteratureAnalyzer:
                 mat[:, j] = mat[:, j].multiply(s)
         self.tfidf_matrix = mat.tocsr()
 
-        print(f"[OK] Seed boosting done: boosted_cols={len(col_scale)}")
+        if verbose:
+            print(f"[OK] Seed boosting done: boosted_cols={len(col_scale)}")
         return len(col_scale)
 
+    def _prepare_coherence_inputs(self):
+        if self.vectorizer is None or self.feature_names is None or self.df is None:
+            print("[Warn] Please run build_tfidf() first.")
+            return None, None, None
+        if gensim_coherence_model is None or gensim_dictionary is None:
+            raise ImportError(
+                "gensim is required for coherence-based topic-number determination. "
+                "Install it via: python -m pip install gensim. "
+                "If installation fails on Python 3.14, use a Python 3.10-3.12 environment."
+            )
+
+        analyzer = self.vectorizer.build_analyzer()
+        vocab = set(self.feature_names.tolist())
+
+        texts = []
+        for txt in self.df["abstract"].astype(str).tolist():
+            toks = [tok for tok in analyzer(txt) if tok in vocab]
+            if toks:
+                texts.append(toks)
+
+        if not texts:
+            print("[Warn] Empty tokenized corpus for coherence.")
+            return None, None, None
+
+        dictionary = gensim_dictionary(texts)
+        corpus = [dictionary.doc2bow(toks) for toks in texts]
+        if len(dictionary) == 0:
+            print("[Warn] Empty dictionary for coherence.")
+            return None, None, None
+
+        return texts, dictionary, corpus
+
+    def _get_topic_top_terms_from_components(self, components, top_n_terms=20):
+        if components is None or self.feature_names is None:
+            return []
+        n = max(2, int(top_n_terms))
+        topics = []
+        for comp in components:
+            top_idx = comp.argsort()[::-1][:n]
+            topics.append([self.feature_names[i] for i in top_idx])
+        return topics
+
+    def determine_optimal_topics_by_coherence(
+        self,
+        k_values,
+        n_seeds=30,
+        top_n_terms=20,
+        use_seed_boost=False,
+        seed_boost=None,
+        nmf_init="nndsvdar",
+        random_seed_start=42,
+        coherence_processes=1,
+        selection_rule="penalized_cv",
+        complexity_lambda=0.25,
+        penalty_k_min=5,
+        penalty_k_max=20,
+        min_topic_docs=3,
+        min_feasible_rate=0.8,
+        plot=True,
+    ):
+        if self.tfidf_matrix_base is None:
+            print("[Warn] Please run build_tfidf() first.")
+            return None, None
+
+        ks = sorted(set([int(k) for k in k_values if int(k) >= 2]))
+        if not ks:
+            print("[Warn] Invalid k_values for coherence scan.")
+            return None, None
+        n_seeds = max(1, int(n_seeds))
+        top_n_terms = max(2, int(top_n_terms))
+        init_choice = str(nmf_init).strip()
+        if init_choice not in {"random", "nndsvd", "nndsvda", "nndsvdar"}:
+            init_choice = "nndsvdar"
+        random_seed_start = int(random_seed_start)
+        coherence_processes = max(1, int(coherence_processes))
+        selection_rule = str(selection_rule).strip().lower()
+        if selection_rule not in {"penalized_cv", "one_se_smallest_k", "max_cv"}:
+            selection_rule = "penalized_cv"
+        complexity_lambda = float(complexity_lambda)
+        penalty_k_min = float(penalty_k_min)
+        penalty_k_max = float(penalty_k_max)
+        min_topic_docs = max(1, int(min_topic_docs))
+        min_feasible_rate = float(min_feasible_rate)
+        if min_feasible_rate < 0.0:
+            min_feasible_rate = 0.0
+        if min_feasible_rate > 1.0:
+            min_feasible_rate = 1.0
+        penalty_span = penalty_k_max - penalty_k_min
+        if abs(penalty_span) < 1e-12:
+            penalty_span = 1.0
+
+        if use_seed_boost and seed_boost is None:
+            seed_boost = {d: 2.5 for d in DIM_SEEDS.keys()}
+
+        texts, dictionary, corpus = self._prepare_coherence_inputs()
+        if texts is None or dictionary is None or corpus is None:
+            print("[Warn] Failed to prepare coherence inputs.")
+            return None, None
+
+        raw_rows = []
+        print(
+            f"\n[Info] Topic-number determination by coherence (gensim) "
+            f"| K candidates={ks} | seeds={n_seeds} | init={init_choice} | processes={coherence_processes}"
+        )
+        for k in ks:
+            cv_list = []
+            umass_list = []
+            for seed_idx in range(n_seeds):
+                seed = random_seed_start + seed_idx
+                self.tfidf_matrix = self.tfidf_matrix_base.copy()
+                if use_seed_boost:
+                    self._boost_seed_features(seed_boost, verbose=False)
+
+                nmf_tmp = NMF(
+                    n_components=int(k),
+                    random_state=seed,
+                    init=init_choice,
+                    max_iter=1500
+                )
+                topic_values_tmp = nmf_tmp.fit_transform(self.tfidf_matrix)
+                topics = self._get_topic_top_terms_from_components(
+                    nmf_tmp.components_,
+                    top_n_terms=top_n_terms,
+                )
+                topic_assign = topic_values_tmp.argmax(axis=1)
+                topic_counts = np.bincount(topic_assign, minlength=int(k))
+                min_topic_size = int(topic_counts.min()) if len(topic_counts) > 0 else 0
+                small_topic_ratio = float((topic_counts < int(min_topic_docs)).mean()) if len(topic_counts) > 0 else 1.0
+                feasible = bool(min_topic_size >= int(min_topic_docs))
+                cv_score = float(gensim_coherence_model(
+                    topics=topics,
+                    texts=texts,
+                    dictionary=dictionary,
+                    coherence="c_v",
+                    processes=coherence_processes,
+                ).get_coherence())
+                umass_score = float(gensim_coherence_model(
+                    topics=topics,
+                    corpus=corpus,
+                    dictionary=dictionary,
+                    coherence="u_mass",
+                    processes=coherence_processes,
+                ).get_coherence())
+                cv_list.append(cv_score)
+                umass_list.append(umass_score)
+                raw_rows.append({
+                    "K": int(k),
+                    "Seed": int(seed),
+                    "C_v": cv_score,
+                    "U_mass": umass_score,
+                    "Top_n_terms": int(top_n_terms),
+                    "NMF_Init": init_choice,
+                    "Coherence_Processes": int(coherence_processes),
+                    "MinTopicDocs": int(min_topic_size),
+                    "SmallTopicRatio": small_topic_ratio,
+                    "ConstraintFeasible": feasible,
+                    "SeedBoost_ON": bool(use_seed_boost),
+                })
+
+            print(
+                f"  - K={k}: C_v={np.mean(cv_list):.6f}+-{np.std(cv_list):.6f}, "
+                f"U_mass={np.mean(umass_list):.6f}+-{np.std(umass_list):.6f}"
+            )
+
+        self.tfidf_matrix = self.tfidf_matrix_base.copy()
+        raw_df = pd.DataFrame(raw_rows)
+        summary_df = (
+            raw_df.groupby("K", as_index=False)
+            .agg(
+                C_v_Mean=("C_v", "mean"),
+                C_v_Std=("C_v", "std"),
+                U_mass_Mean=("U_mass", "mean"),
+                U_mass_Std=("U_mass", "std"),
+                MinTopicDocs_Mean=("MinTopicDocs", "mean"),
+                MinTopicDocs_Min=("MinTopicDocs", "min"),
+                SmallTopicRatio_Mean=("SmallTopicRatio", "mean"),
+                Constraint_Feasible_Rate=("ConstraintFeasible", "mean"),
+                Runs=("Seed", "count"),
+            )
+            .sort_values("K")
+            .reset_index(drop=True)
+        )
+        for col in ["C_v_Std", "U_mass_Std"]:
+            summary_df[col] = summary_df[col].fillna(0.0)
+        summary_df["Complexity_Penalty_Term"] = (summary_df["K"].astype(float) - penalty_k_min) / float(penalty_span)
+        summary_df["Complexity_Penalty"] = complexity_lambda * summary_df["Complexity_Penalty_Term"]
+        summary_df["Penalized_Score"] = summary_df["C_v_Mean"] - summary_df["Complexity_Penalty"]
+        summary_df["Constraint_Passed"] = summary_df["Constraint_Feasible_Rate"] >= float(min_feasible_rate)
+
+        candidate_df = summary_df[summary_df["Constraint_Passed"]].copy()
+        if candidate_df.empty:
+            print(
+                f"[Warn] No K satisfies min-topic-size constraint "
+                f"(min_topic_docs={min_topic_docs}, min_feasible_rate={min_feasible_rate}). "
+                "Falling back to unconstrained selection."
+            )
+            candidate_df = summary_df.copy()
+
+        best_row_cv = candidate_df.sort_values(
+            ["C_v_Mean", "C_v_Std", "U_mass_Mean", "K"],
+            ascending=[False, True, False, True]
+        ).iloc[0]
+        best_cv_mean = float(best_row_cv["C_v_Mean"])
+        best_cv_std = float(best_row_cv["C_v_Std"])
+        one_se_threshold = best_cv_mean - best_cv_std
+
+        if selection_rule == "max_cv":
+            best_row = best_row_cv
+            reason = "max mean C_v"
+        elif selection_rule == "penalized_cv":
+            best_row = candidate_df.sort_values(
+                ["Penalized_Score", "C_v_Mean", "K"],
+                ascending=[False, False, True]
+            ).iloc[0]
+            reason = f"penalized score (lambda={complexity_lambda:.3f})"
+        else:
+            # One-standard-error rule: choose the smallest K whose C_v mean
+            # is within 1 std of the best C_v mean.
+            eligible = candidate_df[candidate_df["C_v_Mean"] >= one_se_threshold].copy()
+            if eligible.empty:
+                eligible = candidate_df.copy()
+            best_row = eligible.sort_values(["K"], ascending=[True]).iloc[0]
+            reason = f"one-SE rule (threshold={one_se_threshold:.6f})"
+
+        best_k = int(best_row["K"])
+        best_cv = float(best_row["C_v_Mean"])
+        print(f"[OK] Selected K={best_k} ({reason}, C_v={best_cv:.6f})")
+
+        self.coherence_seed_scores_df = raw_df
+        summary_df["Selection_Rule"] = selection_rule
+        summary_df["Complexity_Lambda"] = complexity_lambda
+        summary_df["Penalty_K_Min"] = penalty_k_min
+        summary_df["Penalty_K_Max"] = penalty_k_max
+        summary_df["Min_Topic_Docs_Threshold"] = int(min_topic_docs)
+        summary_df["Min_Feasible_Rate_Threshold"] = float(min_feasible_rate)
+        summary_df["OneSE_Threshold_Cv"] = float(one_se_threshold)
+        summary_df["Selected_K"] = (summary_df["K"].astype(int) == int(best_k))
+        self.coherence_scores_df = summary_df
+        self.selected_n_topics = best_k
+
+        if plot:
+            fig, ax = plt.subplots(figsize=(7.0, 4.2), dpi=300)
+            x = summary_df["K"].astype(int).tolist()
+            y_cv = summary_df["C_v_Mean"].astype(float).tolist()
+            e_cv = summary_df["C_v_Std"].astype(float).tolist()
+            y_um = summary_df["U_mass_Mean"].astype(float).tolist()
+            e_um = summary_df["U_mass_Std"].astype(float).tolist()
+            ax.errorbar(x, y_cv, yerr=e_cv, marker="o", linewidth=1.4, capsize=2.5, label="C_v (mean+-std)")
+            ax.axvline(best_k, color="tab:red", linestyle="--", linewidth=1.1, alpha=0.8)
+            if selection_rule == "one_se_smallest_k":
+                ax.axhline(one_se_threshold, color="tab:green", linestyle=":", linewidth=1.0, alpha=0.8)
+            ax.set_title("Topic Coherence by K (C_v / U_mass)")
+            ax.set_xlabel("K (Number of Topics)")
+            ax.set_ylabel("C_v")
+            ax2 = ax.twinx()
+            ax2.errorbar(x, y_um, yerr=e_um, marker="s", linewidth=1.2, capsize=2.5, alpha=0.8, color="tab:orange", label="U_mass (mean+-std)")
+            ax2.set_ylabel("U_mass")
+            _pub_ax(ax, grid_axis="both")
+            fig.tight_layout()
+            fig_path = _get_unique_path("Fig4_topic_coherence.png")
+            plt.savefig(fig_path, dpi=600, bbox_inches="tight")
+            print(f"[Saved] {fig_path}")
+            plt.show()
+
+        return best_k, summary_df
     def extract_topics_guided(self, n_topics=12, seed_boost=None, use_seed_boost=False, top_terms=12, plot=True):
         if self.tfidf_matrix is None:
             print("[Warn] Please run build_tfidf() first.")
@@ -479,7 +786,7 @@ class LiteratureAnalyzer:
         self.nmf_model = NMF(
             n_components=n_topics,
             random_state=42,
-            init="nndsvda",
+            init="nndsvdar",
             max_iter=1500
         )
         self.topic_values = self.nmf_model.fit_transform(self.tfidf_matrix)
@@ -695,8 +1002,7 @@ class LiteratureAnalyzer:
         if self.df is None or self.df.empty:
             print("[Warn] No results to save.")
             return
-        self.df.to_csv(output_file, index=False, encoding="utf-8-sig")
-        print(f"\n[Saved] {output_file}")
+        _write_csv_with_fallback(self.df, output_file)
 
     def save_topic_top_terms(self, output_file="topic_top_terms.csv", run_name=None):
         if self.topic_top_terms_df is None or self.topic_top_terms_df.empty:
@@ -705,8 +1011,7 @@ class LiteratureAnalyzer:
         out_df = self.topic_top_terms_df.copy()
         if run_name is not None and str(run_name).strip():
             out_df.insert(0, "Run_Name", str(run_name))
-        out_df.to_csv(output_file, index=False, encoding="utf-8-sig")
-        print(f"[Saved] {output_file}")
+        _write_csv_with_fallback(out_df, output_file)
 
     def save_topic_dimension_crosswalk(self, output_file="topic_dimension_crosswalk.csv", run_name=None):
         if self.topic_dimension_df is None or self.topic_dimension_df.empty:
@@ -717,8 +1022,22 @@ class LiteratureAnalyzer:
             out_df.insert(0, "K", int(self.n_topics))
         if run_name is not None and str(run_name).strip():
             out_df.insert(0, "Run_Name", str(run_name))
-        out_df.to_csv(output_file, index=False, encoding="utf-8-sig")
-        print(f"[Saved] {output_file}")
+        _write_csv_with_fallback(out_df, output_file)
+
+    def save_coherence_scores(self, output_file="topic_coherence_scan.csv", raw_output_file=None, run_name=None):
+        if self.coherence_scores_df is None or self.coherence_scores_df.empty:
+            print("[Warn] No coherence scan results to save. Run determine_optimal_topics_by_coherence() first.")
+            return
+        out_df = self.coherence_scores_df.copy()
+        if run_name is not None and str(run_name).strip():
+            out_df.insert(0, "Run_Name", str(run_name))
+        _write_csv_with_fallback(out_df, output_file)
+
+        if raw_output_file and self.coherence_seed_scores_df is not None and not self.coherence_seed_scores_df.empty:
+            raw_df = self.coherence_seed_scores_df.copy()
+            if run_name is not None and str(run_name).strip():
+                raw_df.insert(0, "Run_Name", str(run_name))
+            _write_csv_with_fallback(raw_df, raw_output_file)
 
 
 
@@ -726,7 +1045,21 @@ class LiteratureAnalyzer:
 # RUN
 # ===========================
 target_filename = "ktss.bib"  # ??????
-N_TOPICS = 10
+N_TOPICS = 15
+OUTPUT_DIR = ANALYSIS_OUTPUT_DIR
+AUTO_SELECT_TOPICS_BY_COHERENCE = True
+TOPIC_CANDIDATES = list(range(5, 21))
+COHERENCE_NUM_SEEDS = 30
+COHERENCE_TOP_N_TERMS = 20
+COHERENCE_NMF_INIT = "nndsvdar"
+COHERENCE_RANDOM_SEED_START = 42
+COHERENCE_PROCESSES = 1
+COHERENCE_SELECTION_RULE = "penalized_cv"  # "penalized_cv" | "one_se_smallest_k" | "max_cv"
+COHERENCE_COMPLEXITY_LAMBDA = 0.25
+COHERENCE_PENALTY_K_MIN = 5
+COHERENCE_PENALTY_K_MAX = 20
+COHERENCE_MIN_TOPIC_DOCS = 3
+COHERENCE_MIN_FEASIBLE_RATE = 0.8
 
 SEED_BOOST = {
     "Public service delivery": 3.0,
@@ -742,6 +1075,19 @@ def run_pipeline_variant(
     include_domain_low_discrim_stopwords=True,
     use_seed_boost=False,
     output_file="analysis_report.csv",
+    auto_select_topics=AUTO_SELECT_TOPICS_BY_COHERENCE,
+    topic_candidates=TOPIC_CANDIDATES,
+    coherence_num_seeds=COHERENCE_NUM_SEEDS,
+    coherence_top_n_terms=COHERENCE_TOP_N_TERMS,
+    coherence_nmf_init=COHERENCE_NMF_INIT,
+    coherence_random_seed_start=COHERENCE_RANDOM_SEED_START,
+    coherence_processes=COHERENCE_PROCESSES,
+    coherence_selection_rule=COHERENCE_SELECTION_RULE,
+    coherence_complexity_lambda=COHERENCE_COMPLEXITY_LAMBDA,
+    coherence_penalty_k_min=COHERENCE_PENALTY_K_MIN,
+    coherence_penalty_k_max=COHERENCE_PENALTY_K_MAX,
+    coherence_min_topic_docs=COHERENCE_MIN_TOPIC_DOCS,
+    coherence_min_feasible_rate=COHERENCE_MIN_FEASIBLE_RATE,
     plot=False,
 ):
     print("\n" + "=" * 86)
@@ -752,6 +1098,12 @@ def run_pipeline_variant(
     )
     print(f"[Run] domain-generic stopwords included: {include_domain_low_discrim_stopwords}")
     print(f"[Run] seed boosting enabled: {use_seed_boost}")
+    print(f"[Run] coherence-based K selection enabled: {auto_select_topics}")
+    print(f"[Run] K-selection rule: {coherence_selection_rule} (lambda={coherence_complexity_lambda})")
+    print(
+        f"[Run] Min-topic-size constraint: min_topic_docs={coherence_min_topic_docs}, "
+        f"min_feasible_rate={coherence_min_feasible_rate}"
+    )
 
     analyzer = LiteratureAnalyzer(target_filename)
 
@@ -766,8 +1118,33 @@ def run_pipeline_variant(
 
         analyzer.analyze_keywords(top_n=15, plot=plot)
 
+        n_topics_to_use = int(N_TOPICS)
+        if auto_select_topics:
+            best_k, _ = analyzer.determine_optimal_topics_by_coherence(
+                k_values=topic_candidates,
+                n_seeds=coherence_num_seeds,
+                top_n_terms=coherence_top_n_terms,
+                use_seed_boost=use_seed_boost,
+                seed_boost=SEED_BOOST,
+                nmf_init=coherence_nmf_init,
+                random_seed_start=coherence_random_seed_start,
+                coherence_processes=coherence_processes,
+                selection_rule=coherence_selection_rule,
+                complexity_lambda=coherence_complexity_lambda,
+                penalty_k_min=coherence_penalty_k_min,
+                penalty_k_max=coherence_penalty_k_max,
+                min_topic_docs=coherence_min_topic_docs,
+                min_feasible_rate=coherence_min_feasible_rate,
+                plot=plot,
+            )
+            if best_k is not None:
+                n_topics_to_use = int(best_k)
+            print(f"[Run] Using n_topics={n_topics_to_use} (coherence-selected)")
+        else:
+            print(f"[Run] Using n_topics={n_topics_to_use} (fixed)")
+
         analyzer.extract_topics_guided(
-            n_topics=N_TOPICS,
+            n_topics=n_topics_to_use,
             seed_boost=SEED_BOOST,
             use_seed_boost=use_seed_boost,
             top_terms=12,
@@ -784,6 +1161,12 @@ def run_pipeline_variant(
         analyzer.extract_key_sentences(sample_n=3)
         analyzer.save_results(output_file)
         base, _ = os.path.splitext(output_file)
+        if auto_select_topics:
+            analyzer.save_coherence_scores(
+                output_file=f"{base}_coherence_scan.csv",
+                raw_output_file=f"{base}_coherence_scan_raw.csv",
+                run_name=run_name,
+            )
         analyzer.save_topic_top_terms(
             output_file=f"{base}_topic_top_terms.csv",
             run_name=run_name,
@@ -794,29 +1177,36 @@ def run_pipeline_variant(
         )
 
 
-# Main analysis: keep domain-generic stopwords, disable seed boosting.
-run_pipeline_variant(
-    run_name="Main analysis (domain-generic stopwords ON, seed boost OFF)",
-    include_domain_low_discrim_stopwords=True,
-    use_seed_boost=False,
-    output_file="analysis_report.csv",
-    plot=True,
-)
+def main():
+    # Main analysis: keep domain-generic stopwords, enable seed boosting.
+    run_pipeline_variant(
+        run_name="Main analysis (domain-generic stopwords ON, seed boost ON)",
+        include_domain_low_discrim_stopwords=True,
+        use_seed_boost=True,
+        output_file=os.path.join(OUTPUT_DIR, "analysis_report.csv"),
+        plot=True,
+    )
 
-# Robustness A: stopword sensitivity (without domain-generic stopwords).
-run_pipeline_variant(
-    run_name="Robustness A (domain-generic stopwords OFF, seed boost OFF)",
-    include_domain_low_discrim_stopwords=False,
-    use_seed_boost=False,
-    output_file="analysis_report_no_domain_stopwords.csv",
-    plot=False,
-)
+    # Robustness A: stopword sensitivity (without domain-generic stopwords).
+    run_pipeline_variant(
+        run_name="Robustness A (domain-generic stopwords OFF, seed boost ON)",
+        include_domain_low_discrim_stopwords=False,
+        use_seed_boost=True,
+        output_file=os.path.join(OUTPUT_DIR, "analysis_report_no_domain_stopwords.csv"),
+        plot=False,
+    )
 
-# Robustness B: seed-boost sensitivity (boost enabled as robustness version).
-run_pipeline_variant(
-    run_name="Robustness B (domain-generic stopwords ON, seed boost ON)",
-    include_domain_low_discrim_stopwords=True,
-    use_seed_boost=True,
-    output_file="analysis_report_seed_boost.csv",
-    plot=False,
-)
+    # Robustness B: seed-boost sensitivity (disable boosting).
+    run_pipeline_variant(
+        run_name="Robustness B (domain-generic stopwords ON, seed boost OFF)",
+        include_domain_low_discrim_stopwords=True,
+        use_seed_boost=False,
+        output_file=os.path.join(OUTPUT_DIR, "analysis_report_no_seed_boost.csv"),
+        plot=False,
+    )
+
+
+if __name__ == "__main__":
+    freeze_support()
+    main()
+
